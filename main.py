@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer, util
 app = FastAPI()
 
 # 1. Initialize SBERT Model
-model = SentenceTransformer('all-MiniLM-L6-v2')
+model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
 
 JSON_PATH = 'shl_product_catalog.json'
 catalog_titles = []
