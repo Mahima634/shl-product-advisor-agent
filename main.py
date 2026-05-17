@@ -6,7 +6,7 @@ from collections import Counter
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import google.generativeai as genai
+from google import genai as google_genai
 
 app = FastAPI(title="SHL Assessment Recommender")
 
@@ -18,8 +18,7 @@ app.add_middleware(
 )
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("models/gemini-1.5-flash")
+client = google_genai.Client(api_key=GEMINI_API_KEY)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CATALOG_PATH = os.path.join(BASE_DIR, "shl_product_catalog.json")
