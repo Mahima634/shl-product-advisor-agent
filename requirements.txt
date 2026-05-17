@@ -1,5 +1,3 @@
 fastapi
 uvicorn
 pydantic
-sentence-transformers
-pandas
