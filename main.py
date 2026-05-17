@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import google.generativeai as genai
 
-# ─── App Setup ────────────────────────────────────────────────────────────────
 app = FastAPI(title="SHL Assessment Recommender")
 
 app.add_middleware(
@@ -18,26 +17,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Gemini Setup ─────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# ─── Load Catalog ─────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CATALOG_PATH = os.path.join(BASE_DIR, "shl_product_catalog.json")
 
 try:
     with open(CATALOG_PATH, "r", encoding="utf-8") as f:
-    content = f.read()
-    content = content.replace('\x00', '')
-    product_catalog = json.loads(content)
-    print(f"✅ Catalog loaded: {len(product_catalog)} products")
+        content = f.read()
+        content = content.replace('\x00', '')
+        product_catalog = json.loads(content)
+    print(f"Catalog loaded: {len(product_catalog)} products")
 except FileNotFoundError:
     product_catalog = []
-    print("⚠️  Catalog not found")
+    print("Catalog not found")
+except json.JSONDecodeError as e:
+    product_catalog = []
+    print(f"JSON error: {e}")
 
-# ─── TF-IDF Retrieval ─────────────────────────────────────────────────────────
 def tokenize(text: str) -> list:
     text = text.lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
@@ -80,7 +79,6 @@ def cosine_sim(a: dict, b: dict) -> float:
     return dot / mag if mag else 0.0
 
 doc_vectors = [tfidf_vector(tokens) for tokens in corpus_tokens]
-print("✅ TF-IDF index ready")
 
 def retrieve_products(query: str, top_k: int = 20) -> list:
     qvec = tfidf_vector(tokenize(query))
@@ -88,7 +86,6 @@ def retrieve_products(query: str, top_k: int = 20) -> list:
     scored.sort(key=lambda x: x[0], reverse=True)
     return [p for _, p in scored[:top_k]]
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
 def format_candidates(products: list) -> str:
     lines = []
     for p in products:
@@ -117,7 +114,6 @@ def get_test_type_code(keys: list) -> str:
             return mapping[k]
     return "K"
 
-# ─── Models ───────────────────────────────────────────────────────────────────
 class Message(BaseModel):
     role: str
     content: str
@@ -135,7 +131,6 @@ class ChatResponse(BaseModel):
     recommendations: list[RecommendationItem]
     end_of_conversation: bool
 
-# ─── System Prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an expert SHL Assessment Advisor helping hiring managers select the right assessments.
 
 STRICT RULES:
@@ -170,7 +165,6 @@ recommendations = [] when clarifying or refusing.
 recommendations = 1-10 items when you have enough context to commit.
 """
 
-# ─── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -180,15 +174,12 @@ async def chat(request: ChatRequest):
     if not request.messages:
         raise HTTPException(status_code=400, detail="Messages cannot be empty")
 
-    # Combine last 3 user messages for retrieval
     user_messages = [m.content for m in request.messages if m.role == "user"]
     combined_query = " ".join(user_messages[-3:])
 
-    # Retrieve top 20 relevant products
     candidate_products = retrieve_products(combined_query, top_k=20)
     candidates_text = format_candidates(candidate_products)
 
-    # Build conversation history string
     history_text = ""
     for m in request.messages[:-1]:
         role = "User" if m.role == "user" else "Assistant"
@@ -210,8 +201,6 @@ Respond with JSON only:"""
     try:
         response = model.generate_content(full_prompt)
         raw = response.text.strip()
-
-        # Strip markdown fences if Gemini adds them
         raw = re.sub(r"^```json\s*", "", raw)
         raw = re.sub(r"^```\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
@@ -223,7 +212,6 @@ Respond with JSON only:"""
         end_of_conversation = bool(parsed.get("end_of_conversation", False))
         raw_recs = parsed.get("recommendations", [])
 
-        # Validate — only allow catalog URLs
         valid_urls = {p["link"] for p in product_catalog}
         valid_names = {p["name"]: p for p in product_catalog}
         validated = []
