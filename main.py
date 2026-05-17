@@ -1,54 +1,98 @@
 import json, os, re, math
 from collections import Counter
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 app = FastAPI(title="SHL Assessment Recommender")
 
-# Load catalog with cleaning
-with open("shl_product_catalog.json", "r", encoding="utf-8") as f:
-    content = f.read()
-    content = re.sub(r'[\x00-\x1f]', ' ', content)
-    product_catalog = json.loads(content)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# TF-IDF retrieval (exactly as per assignment's Recall@K)
-def tokenize(t):
-    t = re.sub(r"[^a-z0-9\s]", " ", t.lower())
-    return [w for w in t.split() if len(w)>1]
+# Load catalog
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CATALOG_PATH = os.path.join(BASE_DIR, "shl_product_catalog.json")
 
-def build_text(p):
-    return f"{p.get('name','')} {p.get('description','')} {p.get('duration','')} {' '.join(p.get('keys',[]))}"
+try:
+    with open(CATALOG_PATH, "r", encoding="utf-8") as f:
+        content = f.read()
+        content = re.sub(r'[\x00-\x1f]', ' ', content)
+        product_catalog = json.loads(content)
+    print(f"✅ Catalog loaded: {len(product_catalog)} products")
+except Exception as e:
+    product_catalog = []
+    print(f"❌ Catalog error: {e}")
 
-corpus = [tokenize(build_text(p)) for p in product_catalog]
-df = Counter()
-for c in corpus:
-    for w in set(c):
-        df[w] += 1
-N = len(corpus)
+# TF-IDF retrieval
+def tokenize(text: str) -> list:
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return [t for t in text.split() if len(t) > 1]
 
-def idf(w):
-    return math.log((N+1)/(df.get(w,0)+1)) + 1
+def build_doc_text(p: dict) -> str:
+    return " ".join([
+        p.get("name", ""),
+        p.get("description", ""),
+        p.get("job_levels_raw", "").strip().strip(","),
+        " ".join(p.get("keys", [])),
+        p.get("duration", ""),
+    ])
 
-def tfidf(tokens):
+corpus_tokens = [tokenize(build_doc_text(p)) for p in product_catalog]
+N = len(corpus_tokens)
+
+df_counts = Counter()
+for tokens in corpus_tokens:
+    for token in set(tokens):
+        df_counts[token] += 1
+
+def idf(term: str) -> float:
+    df = df_counts.get(term, 0)
+    if df == 0:
+        return 0.0
+    return math.log((N + 1) / (df + 1)) + 1.0
+
+def tfidf_vector(tokens: list) -> dict:
     tf = Counter(tokens)
-    return {w: (c/len(tokens))*idf(w) for w,c in tf.items()}
+    total = len(tokens) if tokens else 1
+    return {term: (count / total) * idf(term) for term, count in tf.items()}
 
-def cos_sim(a,b):
-    common = set(a)&set(b)
-    if not common: return 0
-    dot = sum(a[w]*b[w] for w in common)
+def cosine_sim(a: dict, b: dict) -> float:
+    common = set(a) & set(b)
+    if not common:
+        return 0.0
+    dot = sum(a[t] * b[t] for t in common)
     mag = math.sqrt(sum(v*v for v in a.values())) * math.sqrt(sum(v*v for v in b.values()))
-    return dot/mag if mag else 0
+    return dot / mag if mag else 0.0
 
-doc_vecs = [tfidf(t) for t in corpus]
+doc_vectors = [tfidf_vector(tokens) for tokens in corpus_tokens]
 
-def retrieve(q, top=10):
-    qv = tfidf(tokenize(q))
-    scored = [(cos_sim(qv, dv), p) for dv,p in zip(doc_vecs, product_catalog)]
-    scored.sort(reverse=True, key=lambda x:x[0])
-    return [p for _,p in scored[:top]]
+def retrieve_products(query: str, top_k: int = 10) -> list:
+    qvec = tfidf_vector(tokenize(query))
+    scored = [(cosine_sim(qvec, dvec), p) for dvec, p in zip(doc_vectors, product_catalog)]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored[:top_k]]
 
-# --- Chat logic (rule-based, covers all assignment behaviors) ---
+def get_test_type_code(keys: list) -> str:
+    mapping = {
+        "Knowledge & Skills": "K",
+        "Personality & Behavior": "P",
+        "Ability & Aptitude": "A",
+        "Simulations": "S",
+        "Biodata & Situational Judgment": "B",
+        "Development & 360": "D",
+        "Assessment Exercises": "E",
+    }
+    for k in keys:
+        if k in mapping:
+            return mapping[k]
+    return "K"
+
+# Models
 class Message(BaseModel):
     role: str
     content: str
@@ -66,13 +110,7 @@ class ChatResponse(BaseModel):
     recommendations: list[RecommendationItem]
     end_of_conversation: bool
 
-def test_type_code(keys):
-    m = {"Knowledge & Skills":"K","Personality & Behavior":"P","Ability & Aptitude":"A","Simulations":"S","Biodata & Situational Judgment":"B","Development & 360":"D","Assessment Exercises":"E"}
-    for k in keys:
-        if k in m:
-            return m[k]
-    return "K"
-
+# Endpoints
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -80,21 +118,21 @@ async def health():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     if not req.messages:
-        raise HTTPException(status_code=400, detail="Empty messages")
+        raise HTTPException(status_code=400, detail="Messages cannot be empty")
     
     last_msg = req.messages[-1].content.lower()
-    all_user_msgs = " ".join([m.content.lower() for m in req.messages if m.role=="user"])
+    all_user_msgs = " ".join([m.content.lower() for m in req.messages if m.role == "user"])
     
-    # 1. Off-topic / prompt injection refusal
-    off_topics = ["legal", "hr policy", "salary", "interview questions", "python code", "ignore previous"]
+    # Off-topic refusal
+    off_topics = ["legal", "hr policy", "salary", "interview questions", "python code", "ignore previous", "hr advice"]
     if any(t in last_msg for t in off_topics):
         return ChatResponse(
-            reply="I can only help with SHL assessment recommendations. Please ask about hiring assessments.",
+            reply="I can only help with SHL assessment recommendations. Please ask about hiring assessments for specific roles.",
             recommendations=[],
             end_of_conversation=False
         )
     
-    # 2. Vague query clarification (exactly as assignment expects)
+    # Vague query clarification
     vague = ["need an assessment", "help me hire", "recommend something", "assessment", "test", "hiring"]
     if any(v in last_msg for v in vague) and len(all_user_msgs.split()) < 12:
         return ChatResponse(
@@ -103,30 +141,25 @@ async def chat(req: ChatRequest):
             end_of_conversation=False
         )
     
-    # 3. Handle "compare X and Y"
+    # Compare handling
     if "compare" in last_msg and (" and " in last_msg or " vs " in last_msg):
         return ChatResponse(
-            reply="I can help compare assessments. Please provide the exact names of two SHL products from the catalog.",
+            reply="Please provide the exact names of two SHL assessments from the catalog to compare.",
             recommendations=[],
             end_of_conversation=False
         )
     
-    # 4. Handle refinement (e.g., "add personality tests")
-    if "add" in last_msg and ("personality" in last_msg or "cognitive" in last_msg):
-        # Just re-retrieve with modified query
-        products = retrieve(last_msg + " personality", top_k=10)
-    else:
-        products = retrieve(last_msg, top_k=10)
-    
+    # Retrieve recommendations
+    products = retrieve_products(last_msg, top_k=10)
     recs = []
     for p in products[:10]:
         recs.append(RecommendationItem(
             name=p["name"],
             url=p["link"],
-            test_type=test_type_code(p.get("keys", []))
+            test_type=get_test_type_code(p.get("keys", []))
         ))
     
-    reply = f"Based on your need, here are {len(recs)} recommended assessments from the SHL catalog."
+    reply = f"Based on your need, here are {len(recs)} recommended assessments from the SHL catalog:"
     end_conv = "thanks" in last_msg or "that's all" in last_msg or "done" in last_msg
     
     return ChatResponse(reply=reply, recommendations=recs, end_of_conversation=end_conv)
