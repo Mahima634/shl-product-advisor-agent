@@ -29,7 +29,9 @@ CATALOG_PATH = os.path.join(BASE_DIR, "shl_product_catalog.json")
 
 try:
     with open(CATALOG_PATH, "r", encoding="utf-8") as f:
-        product_catalog = json.load(f)
+    content = f.read()
+    content = content.replace('\x00', '')
+    product_catalog = json.loads(content)
     print(f"✅ Catalog loaded: {len(product_catalog)} products")
 except FileNotFoundError:
     product_catalog = []
